@@ -49,6 +49,7 @@ export var depth_blending = false
 export var cliff_triplanar = false
 export var ground_texture_scale = 20.0
 export var collision_enabled = false setget set_collision_enabled
+# TODO Deprecate this, now users can load the data as a normal resource and use a thread if wanted
 export var async_loading = false
 
 # Prefer using this instead of scaling the node's transform.
@@ -98,8 +99,10 @@ func _get_property_list():
 			"hint": PROPERTY_HINT_DIR
 		},
 		{
-			# The actual data resource is only exposed for storage
-			"name": "_data",
+			# The actual data resource is only exposed for storage.
+			# I had to name it so that Godot won't try to assign _data directly
+			# instead of using the setter I made...
+			"name": "_terrain_data",
 			"type": TYPE_OBJECT,
 			"usage": PROPERTY_USAGE_STORAGE,
 			"hint": PROPERTY_HINT_RESOURCE_TYPE,
@@ -131,7 +134,7 @@ func _get(key):
 	if key == "data_directory":
 		return _get_data_directory()
 
-	if key == "_data":
+	if key == "_terrain_data":
 		if _data == null or _data.resource_path == "":
 			# Consider null if the data is not set or has no path,
 			# because in those cases we can't save the terrain properly
@@ -157,7 +160,7 @@ func _set(key, value):
 
 	# Can't use setget when the exported type is custom,
 	# because we were also are forced to use _get_property_list...
-	elif key == "_data":
+	elif key == "_terrain_data":
 		set_data(value)
 	
 	for ground_texture_type in range(GROUND_TEXTURE_TYPE_COUNT):
@@ -171,20 +174,28 @@ func _set(key, value):
 
 
 func _set_data_directory(dir):
-	if value != _get_data_directory():
-		if value == "":
+	if dir != _get_data_directory():
+		if dir == "":
 			set_data(null)
 		else:
-			var d = HTerrainData.new()
-			d.resource_path = value
-			set_data(d)
+			var fpath = dir.plus_file(HTerrainData.META_FILENAME)
+			var f = File.new()
+			if f.file_exists(fpath):
+				# Load existing
+				var d = load(fpath)
+				set_data(d)
+			else:
+				# Create new
+				var d = HTerrainData.new()
+				d.resource_path = fpath
+				set_data(d)
 	else:
 		print("WARNING: setting twice the same terrain directory??")
 
 
 func _get_data_directory():
 	if _data != null:
-		return _data.resource_path
+		return _data.resource_path.get_base_dir()
 	return ""
 
 
@@ -290,39 +301,6 @@ func _on_transform_changed():
 
 func _enter_tree():
 	print("Enter tree")
-		
-	#   .                                                      .
-	#          .n                   .                 .                  n.
-	#    .   .dP                  dP                   9b                 9b.    .
-	#   4    qXb         .       dX                     Xb       .        dXp     t
-	#  dX.    9Xb      .dXb    __                         __    dXb.     dXP     .Xb
-	#  9XXb._       _.dXXXXb dXXXXbo.                 .odXXXXb dXXXXb._       _.dXXP
-	#   9XXXXXXXXXXXXXXXXXXXVXXXXXXXXOo.           .oOXXXXXXXXVXXXXXXXXXXXXXXXXXXXP
-	#    `9XXXXXXXXXXXXXXXXXXXXX'~   ~`OOO8b   d8OOO'~   ~`XXXXXXXXXXXXXXXXXXXXXP'
-	#      `9XXXXXXXXXXXP' `9XX'   DIE    `98v8P'  HUMAN   `XXP' `9XXXXXXXXXXXP'
-	#          ~~~~~~~       9X.          .db|db.          .XP       ~~~~~~~
-	#                          )b.  .dbo.dP'`v'`9b.odb.  .dX(
-	#                        ,dXXXXXXXXXXXb     dXXXXXXXXXXXb.
-	#                       dXXXXXXXXXXXP'   .   `9XXXXXXXXXXXb
-	#                      dXXXXXXXXXXXXb   d|b   dXXXXXXXXXXXXb
-	#                      9XXb'   `XXXXXb.dX|Xb.dXXXXX'   `dXXP
-	#                       `'      9XXXXXX(   )XXXXXXP      `'
-	#                                XXXX X.`v'.X XXXX
-	#                                XP^X'`b   d'`X^XX
-	#                                X. 9  `   '  P )X
-	#                                `b  `       '  d'
-	#                                 `             '
-	# TODO This is temporary until I get saving and loading to work the proper way!
-	# Terrain data should be able to load even before being assigned to its node.
-	# This makes the terrain load automatically
-	if _data != null and _data.get_resolution() == 0:
-		# Note: async loading in editor is better UX
-		if Engine.editor_hint or async_loading:
-			_data.load_data_async()
-		else:
-			# The game will freeze until enough data is ready
-			_data.load_data()
-	
 	set_process(true)
 
 

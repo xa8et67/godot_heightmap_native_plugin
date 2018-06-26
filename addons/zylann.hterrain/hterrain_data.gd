@@ -19,7 +19,7 @@ const DEFAULT_RESOLUTION = 512
 # TODO Have vertical bounds chunk size to emphasise the fact it's independent
 # TODO Have undo chunk size to emphasise the fact it's independent
 
-const DATA_FOLDER_SUFFIX = ".hterrain_data"
+const META_FILENAME = "data.hterrain"
 
 
 signal resolution_changed
@@ -97,22 +97,6 @@ func _get(key):
 		"resolution":
 			return get_resolution()
 
-		"_maps_data":
-			var data = []
-			data.resize(len(_maps))
-
-			for i in range(len(_maps)):
-				var maps = _maps[i]
-				var maps_data = []
-
-				for j in range(len(maps)):
-					var map = maps[j]
-					maps_data.append({ "id": map.id })
-				
-				data[i] = maps_data
-			
-			return data
-
 
 func _set(key, v):
 	match key:
@@ -124,32 +108,6 @@ func _set(key, v):
 			# and resizing on load wouldn't make sense.
 			assert(typeof(v) == TYPE_INT)
 			set_resolution(v)
-
-		"_maps_data":
-			# Parse metadata that we'll then use to load the actual terrain
-			# (How many maps, which files to load etc...)
-			var data = v
-			_maps.resize(len(data))
-
-			for i in range(len(data)):
-				var maps = _maps[i]
-
-				if maps == null:
-					maps = []
-					_maps[i] = maps
-
-				var maps_data = data[i]
-				if len(maps) != len(maps_data):
-					maps.resize(len(maps_data))
-
-				for j in range(len(maps)):
-					var map = maps[j]
-					var id = maps_data[j].id
-					if map == null:
-						map = Map.new(id)
-						maps[j] = map
-					else:
-						map.id = id
 
 
 func _set_default_maps():
@@ -858,12 +816,15 @@ func _notify_progress_complete():
 	_notify_progress("Done", 1.0, true)
 
 
-func save_data_async():
+func save_data_async(data_dir):
 	if not _is_any_map_modified():
 		print("Terrain data has no modifications to save")
 		return
 
 	_locked = true
+
+	_save_metadata(data_dir.plus_file(META_FILENAME))
+
 	_notify_progress("Saving terrain data...", 0.0)
 	yield(self, "_internal_process")
 	
@@ -885,7 +846,7 @@ func save_data_async():
 				" as ", _get_map_filename(channel, index), "..."), p)
 
 			yield(self, "_internal_process")
-			_save_channel(channel, index)
+			_save_channel(data_dir, channel, index)
 
 			map.modified = false
 			pi += 1
@@ -911,14 +872,92 @@ func _get_total_map_count():
 	return s
 
 
-func load_data():
-	load_data_async()
+func save_data(dir_path):
+	save_data_async(dir_path)
 	while not _progress_complete:
 		emit_signal("_internal_process")
 
 
-func load_data_async():
+func load_data(dir_path):
+	load_data_async(dir_path)
+	while not _progress_complete:
+		emit_signal("_internal_process")
+
+
+func _load_metadata(path):
+	var f = File.new()
+	var err = f.open(path, File.READ)
+	assert(err == OK)
+	var text = f.get_as_text()
+	f.close()
+	var res = JSON.parse(text)
+	assert(res.error == OK)
+	_deserialize_metadata(res.result)
+
+
+func _save_metadata(path):
+	var f = File.new()
+	var d = _serialize_metadata()
+	var text = JSON.print(d, "\t", true)
+	var err = f.open(path, File.WRITE)
+	assert(err == OK)
+	f.store_string(text)
+	f.close()
+
+
+func _serialize_metadata():
+	var data = []
+	data.resize(len(_maps))
+
+	for i in range(len(_maps)):
+		var maps = _maps[i]
+		var maps_data = []
+
+		for j in range(len(maps)):
+			var map = maps[j]
+			maps_data.append({ "id": map.id })
+		
+		data[i] = maps_data
+	
+	return { 
+		"version": "0.7",
+		"maps": data
+	}
+
+
+# Parse metadata that we'll then use to load the actual terrain
+# (How many maps, which files to load etc...)
+func _deserialize_metadata(dict):
+
+	var data = dict["maps"]
+	_maps.resize(len(data))
+
+	for i in range(len(data)):
+		var maps = _maps[i]
+
+		if maps == null:
+			maps = []
+			_maps[i] = maps
+
+		var maps_data = data[i]
+		if len(maps) != len(maps_data):
+			maps.resize(len(maps_data))
+
+		for j in range(len(maps)):
+			var map = maps[j]
+			var id = maps_data[j].id
+			if map == null:
+				map = Map.new(id)
+				maps[j] = map
+			else:
+				map.id = id
+
+
+func load_data_async(dir_path):
 	_locked = true
+
+	_load_metadata(dir_path.plus_file(META_FILENAME))
+
 	_notify_progress("Loading terrain data...", 0.0)
 	yield(self, "_internal_process")
 	
@@ -937,7 +976,7 @@ func load_data_async():
 				" from ", _get_map_filename(map_type, index), "..."), p)
 			yield(self, "_internal_process")
 
-			_load_channel(map_type, index)
+			_load_channel(dir_path, map_type, index)
 
 			# A map that was just loaded is considered not modified yet
 			_maps[map_type][index].modified = false
@@ -958,11 +997,13 @@ func load_data_async():
 
 
 func get_data_dir():
-	# TODO Eventually have that one configurable?
-	return resource_path.get_basename() + DATA_FOLDER_SUFFIX
+	# The HTerrainData resource represents the metadata and entry point for Godot.
+	# It should be placed within a folder dedicated for terrain storage.
+	# Other heavy data such as maps are stored next to that file.
+	return resource_path.get_base_dir()
 
 
-func _save_channel(channel, index):
+func _save_channel(dir_path, channel, index):
 	var map = _maps[channel][index]
 	var im = map.image
 	if im == null:
@@ -975,7 +1016,6 @@ func _save_channel(channel, index):
 			# This data doesn't have such channel
 			return true
 	
-	var dir_path = get_data_dir()
 	var dir = Directory.new()
 	if not dir.dir_exists(dir_path):
 		dir.make_dir(dir_path)
@@ -1009,8 +1049,7 @@ func _save_channel(channel, index):
 	return true
 
 
-func _load_channel(channel, index):
-	var dir = get_data_dir()
+func _load_channel(dir, channel, index):
 	var fpath = dir.plus_file(_get_map_filename(channel, index))
 
 	# Maps must be configured before being loaded
