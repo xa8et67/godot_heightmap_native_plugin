@@ -1,27 +1,29 @@
 shader_type canvas_item;
 
-uniform sampler2D noise_texture;
+uniform sampler2D u_noise_texture;
 uniform vec2 u_offset;
+uniform float u_scale = 0.02;
 uniform float u_base_height = 0.0;
 uniform float u_height_range = 100.0;
 uniform int u_seed;
-uniform float u_scale = 0.02;
 uniform int u_octaves = 5;
 uniform float u_roughness = 0.5;
 uniform float u_curve = 1.0;
-uniform int u_mode = 0; // 0: heights, 1: normals
+
+uniform vec2 u_uv_offset;
+uniform vec2 u_uv_scale = vec2(1.0, 1.0);
 
 float get_noise(vec2 uv) {
 
-	vec2 ts = vec2(textureSize(noise_texture, 0));
+	vec2 ts = vec2(textureSize(u_noise_texture, 0));
 	//vec2 ps = 1.0 / ts;
 
 	vec2 puv = uv * ts;
 
-	float c00 = texture(noise_texture, floor(puv) / ts).r;
-	float c10 = texture(noise_texture, floor(puv + vec2(1.0, 0.0)) / ts).r;
-	float c01 = texture(noise_texture, floor(puv + vec2(0.0, 1.0)) / ts).r;
-	float c11 = texture(noise_texture, floor(puv + vec2(1.0, 1.0)) / ts).r;
+	float c00 = texture(u_noise_texture, floor(puv) / ts).r;
+	float c10 = texture(u_noise_texture, floor(puv + vec2(1.0, 0.0)) / ts).r;
+	float c01 = texture(u_noise_texture, floor(puv + vec2(0.0, 1.0)) / ts).r;
+	float c11 = texture(u_noise_texture, floor(puv + vec2(1.0, 1.0)) / ts).r;
 
 	vec2 fuv = fract(puv);
 
@@ -34,11 +36,11 @@ float get_noise(vec2 uv) {
 	// but for some reason it has 8-bit quality results, despite the texture being 32bit,
 	// which produce aliasing when calculating normals...
 	// something must be wrong between my driver and Godot
-	//return texture(noise_texture, uv).r;
+	//return texture(u_noise_texture, uv).r;
 }
 
 float get_smooth_noise(vec2 uv, int extra_magic_rot) {
-	float scale = u_scale;
+	float scale = 1.0;
 	float sum = 0.0;
 	float amp = 0.0;
 	int octaves = u_octaves;
@@ -62,16 +64,9 @@ float get_smooth_noise(vec2 uv, int extra_magic_rot) {
 }
 
 float get_height(vec2 uv) {
-	
 	float h = get_smooth_noise(uv, 0);
 	h = pow(h, u_curve);
 	h = u_base_height + h * u_height_range;
-
-	// Test pattern
-	// float s = 1.0 / u_scale;
-	// float h = u_base_height + 0.5 * u_height_range * (cos(s * uv.x) + sin(s * uv.y));
-	//float h = uv.x * 513.0;
-
 	return h;
 }
 
@@ -80,30 +75,14 @@ vec3 pack_normal(vec3 n) {
 }
 
 void fragment() {
-	vec2 uv = UV + u_offset;
+	vec2 uv = SCREEN_UV;
 
-	if(u_mode == 0) {
+	// Handle screen padding: transform UV back into generation space
+	uv = (uv + u_uv_offset) * u_uv_scale;
 
-		float h = get_height(uv);
-		COLOR = vec4(h, h, h, 1.0);
+	// Offset and scale for the noise itself
+	uv = (uv + u_offset) * u_scale;
 
-	} else {
-
-		// Calculating normals here because if it were done as post-processing,
-		// it would work on half-precision floats, which produces aliasing.
-		// It also speeds up final generation considerably so normals don't need to be computed on CPU.
-
-		// Needs to be SCREEN_PIXEL_SIZE because the dummy texture used with this shader
-		// may not be the same size as the render target we are using as output
-		vec2 ps = SCREEN_PIXEL_SIZE;
-		float k = 1.0;
-		float left = get_height(uv + vec2(-ps.x, 0)) * k;
-		float right = get_height(uv + vec2(ps.x, 0)) * k;
-		float back = get_height(uv + vec2(0, -ps.y)) * k;
-		float fore = get_height(uv + vec2(0, ps.y)) * k;
-		vec3 n = normalize(vec3(left - right, 2.0, fore - back));
-		
-		vec3 pn = pack_normal(n);
-		COLOR = vec4(pn, 1.0);
-	}
+	float h = get_height(uv);
+	COLOR = vec4(h, h, h, 1.0);
 }

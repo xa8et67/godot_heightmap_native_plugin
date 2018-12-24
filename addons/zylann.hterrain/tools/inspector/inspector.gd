@@ -1,3 +1,8 @@
+
+# GDScript implementation of an inspector.
+# It generates controls for a provided list of properties,
+# which is easier to maintain than placing them by hand and connecting things in the editor.
+
 tool
 extends Control
 
@@ -22,6 +27,26 @@ class ResourceEditor extends Editor:
 	func set_value(v):
 		value = v
 		label.text = "null" if v == null else v.resource_path
+
+
+class VectorEditor extends Editor:
+	signal value_changed(v)
+	
+	var value = Vector2()
+	var xed = null
+	var yed = null
+	
+	func get_value():
+		return value
+	
+	func set_value(v):
+		xed.value = v.x
+		yed.value = v.y
+		value = v
+	
+	func _component_changed(v, i):
+		value[i] = v
+		emit_signal("value_changed", value)		
 
 
 # TODO Rename _schema
@@ -137,6 +162,7 @@ func _make_editor(key, prop):
 			_setup_range_control(spinbox, prop)
 			spinbox.connect("value_changed", self, "_property_edited", [key])
 			
+			# TODO In case the type is INT, the getter should return an integer!
 			getter = funcref(spinbox, "get_value")
 			setter = funcref(spinbox, "set_value")
 			
@@ -193,7 +219,7 @@ func _make_editor(key, prop):
 			setter = funcref(editor, "set_pick_color")
 			
 		TYPE_BOOL:
-			editor = CheckButton.new()
+			editor = CheckBox.new()
 			editor.connect("toggled", self, "_property_edited", [key])
 			getter = funcref(editor, "is_pressed")
 			setter = funcref(editor, "set_pressed")
@@ -224,6 +250,40 @@ func _make_editor(key, prop):
 				ed.label = label
 				getter = funcref(ed, "get_value")
 				setter = funcref(ed, "set_value")
+		
+		TYPE_VECTOR2:
+			editor = HBoxContainer.new()
+
+			ed = VectorEditor.new()
+
+			var xlabel = Label.new()
+			xlabel.text = "x"
+			editor.add_child(xlabel)
+			var xed = SpinBox.new()
+			xed.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			xed.step = 0.01
+			xed.min_value = -10000
+			xed.max_value = 10000
+			# TODO This will fire twice (for each coordinate), hmmm...
+			xed.connect("value_changed", ed, "_component_changed", [0])
+			editor.add_child(xed)
+			
+			var ylabel = Label.new()
+			ylabel.text = "y"
+			editor.add_child(ylabel)
+			var yed = SpinBox.new()
+			yed.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			yed.step = 0.01
+			yed.min_value = -10000
+			yed.max_value = 10000
+			yed.connect("value_changed", ed, "_component_changed", [1])
+			editor.add_child(yed)
+			
+			ed.xed = xed
+			ed.yed = yed
+			ed.connect("value_changed", self, "_property_edited", [key])
+			getter = funcref(ed, "get_value")
+			setter = funcref(ed, "set_value")
 		
 		_:
 			editor = Label.new()
@@ -307,7 +367,7 @@ func _open_file_dialog(filters, callback, binds, access):
 		_file_dialog.add_filter(filter)
 	_file_dialog.connect("popup_hide", self, "call_deferred", ["_on_file_dialog_close"], CONNECT_ONESHOT)
 	_file_dialog.connect("file_selected", self, callback, binds)
-	_file_dialog.popup_centered_minsize()
+	_file_dialog.popup_centered_ratio(0.7)
 
 
 func _on_file_dialog_close():

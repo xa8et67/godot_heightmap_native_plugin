@@ -4,6 +4,44 @@ Changelog
 This is a high-level changelog for each released versions of the plugin.
 For a more detailed list of past and incoming changes, see the commit history.
 
+0.10 (WIP)
+----------
+
+- Added morphologic erosion to terrain generator
+- Added global map baking
+- Added ground shader parameter to blend towards global map over distance
+- Added properties to tint grass using the global map
+- Added property to tweak shading at the bottom of grass
+- Speed up sculpting by moving normals baking to GPU
+- Slightly improved LOD performance
+- Increased default file dialog size when selecting grass texture
+- Fixed issue with grass shading based on ground normals
+- Fixed grass preview lighting (was too dark)
+
+0.9.1
+------------
+
+- Reduce checkbox size in generator tool
+- Make zoom slower in generator tool
+- Fixed brush decal not showing up at certain angles
+- Fixed script error in some of the tools
+- Fixed terrain inspector not allowing to set shader textures
+
+
+0.9
+---------
+
+- Bring back configurable brush shapes
+- Improved terrain generator UI with 3D preview, baseline and draggable offset
+- Added tool to generate a full mesh of the terrain so Godot can bake a navmesh
+- The strength of sculpting tools is now proportional to brush size
+- Terrain resources generate a greyscale thumbnail
+- Resizing can be done by cropping or expanding in a given direction (Terrain menu)
+- Fixed potential cleanup error when the editor closes
+- Fixed custom types not cleaned up when the plugin is disabled
+- Fixed LOD to take height into account on tall mountains
+- Fixed terrain textures being lossy-compressed when reopening the project
+- Fixed grass painting being available when there are no detail layers
 
 
 0.8.1

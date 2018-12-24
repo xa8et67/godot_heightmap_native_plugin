@@ -12,7 +12,8 @@ const CHANNEL_NORMAL = 1
 const CHANNEL_SPLAT = 2
 const CHANNEL_COLOR = 3
 const CHANNEL_DETAIL = 4
-const CHANNEL_COUNT = 5
+const CHANNEL_GLOBAL_ALBEDO = 5
+const CHANNEL_COUNT = 6
 
 const MAX_RESOLUTION = 4096 + 1
 const MIN_RESOLUTION = 64 + 1 # must be higher than largest minimum chunk size
@@ -62,6 +63,7 @@ var _resolution = 0
 # [map_type][instance_index] => map
 var _maps = [[]]
 
+# TODO Store vertical bounds in a RGF image? Where R is min amd G is max
 var _chunked_vertical_bounds = []
 var _chunked_vertical_bounds_size = [0, 0]
 var _locked = false
@@ -78,12 +80,6 @@ func _init():
 func _get_property_list():
 	var props = [
 		{
-			# TODO Only allow predefined resolutions, because that's currently the case
-			"name": "resolution",
-			"type": TYPE_INT,
-			"usage": PROPERTY_USAGE_EDITOR
-		},
-		{
 			# I can't use `_maps` because otherwise Godot takes the member variable directly,
 			# and ignores whatever I've put in `_get`
 			"name": "_maps_data",
@@ -96,9 +92,6 @@ func _get_property_list():
 
 func _get(key):
 	match key:
-		"resolution":
-			return get_resolution()
-
 		"_maps_data":
 			var data = []
 			data.resize(len(_maps))
@@ -118,15 +111,6 @@ func _get(key):
 
 func _set(key, v):
 	match key:
-		# TODO Should we even allow this to be set if there is existing data which isn't loaded yet?
-		"resolution":
-			# Setting resolution has only effect when set from editor or a script.
-			# It's not part of the saved resource variables because it is
-			# deduced from the height texture,
-			# and resizing on load wouldn't make sense.
-			assert(typeof(v) == TYPE_INT)
-			set_resolution(v)
-
 		"_maps_data":
 			# Parse metadata that we'll then use to load the actual terrain
 			# (How many maps, which files to load etc...)
@@ -167,8 +151,7 @@ func _set_default_maps():
 func _edit_load_default():
 	print("Loading default data")
 	_set_default_maps()
-	set_resolution(DEFAULT_RESOLUTION)
-	_update_all_normals()
+	resize(DEFAULT_RESOLUTION)
 
 
 # Don't use the data if this getter returns false
@@ -180,13 +163,28 @@ func get_resolution():
 	return _resolution
 
 
+# @obsolete
 func set_resolution(p_res):
-	set_resolution2(p_res, true)
+	print("`HTerrainData.set_resolution()` is obsolete, use `resize()` instead")
+	resize(p_res)
 
 
+# @obsolete
 func set_resolution2(p_res, update_normals):
+	print("`HTerrainData.set_resolution2()` is obsolete, use `resize()` instead")
+	resize(p_res, true, Vector2(-1, -1))
+
+
+# Resizes all maps of the terrain. This may take some time to complete.
+# Note that no upload to GPU is done, you have to do it once you're done with all changes,
+# by calling `notify_region_change` or `notify_full_change`.
+# p_res: new resolution. Must be a power of two + 1.
+# stretch: if true, the terrain will be stretched in X and Z axes. If false, it will be cropped or expanded.
+# anchor: if stretch is false, decides which side or corner to crop/expand the terrain from.
+func resize(p_res, stretch=true, anchor=Vector2(-1, -1)):
 	assert(typeof(p_res) == TYPE_INT)
-	assert(typeof(update_normals) == TYPE_BOOL)
+	assert(typeof(stretch) == TYPE_BOOL)
+	assert(typeof(anchor) == TYPE_VECTOR2)
 	
 	print("HeightMapData::set_resolution ", p_res)
 	
@@ -202,7 +200,7 @@ func set_resolution2(p_res, update_normals):
 	p_res = Util.next_power_of_two(p_res - 1) + 1
 
 	_resolution = p_res;
-	
+
 	for channel in range(CHANNEL_COUNT):
 		var maps = _maps[channel]
 		
@@ -214,7 +212,7 @@ func set_resolution2(p_res, update_normals):
 			
 			if im == null:
 				im = Image.new()
-				im.create(_resolution, _resolution, false, _get_channel_format(channel))
+				im.create(_resolution, _resolution, false, get_channel_format(channel))
 				
 				var fill_color = _get_channel_default_fill(channel)
 				if fill_color != null:
@@ -223,20 +221,20 @@ func set_resolution2(p_res, update_normals):
 				map.image = im
 				
 			else:
-				if channel == CHANNEL_NORMAL:
-					im.create(_resolution, _resolution, false, _get_channel_format(channel))
-					if update_normals:
-						_update_all_normals()
+				if stretch and channel == CHANNEL_NORMAL:
+					im.create(_resolution, _resolution, false, get_channel_format(channel))
 				else:
-					im.resize(_resolution, _resolution)
+					if stretch:
+						im.resize(_resolution, _resolution)
+					else:
+						map.image = Util.get_cropped_image( \
+							im, _resolution, _resolution, _get_channel_default_fill(channel), anchor)
 			
 			map.modified = true
 
 	_update_all_vertical_bounds()
 
 	emit_signal("resolution_changed")
-
-	# TODO No upload to GPU? I wonder how this worked so far, maybe I didn't intend this?
 
 
 static func _get_clamped(im, x, y):
@@ -339,116 +337,6 @@ func get_all_heights():
 	return get_heights_region(0, 0, _resolution, _resolution)
 
 
-# TODO Have an async version that uses the GPU
-func _update_all_normals():
-	update_normals(0, 0, _resolution, _resolution)
-
-
-func update_normals(min_x, min_y, size_x, size_y):	
-	#var time_before = OS.get_ticks_msec()
-
-	assert(typeof(min_x) == TYPE_INT)
-	assert(typeof(min_y) == TYPE_INT)
-	assert(typeof(size_x) == TYPE_INT)
-	assert(typeof(size_x) == TYPE_INT)
-	
-	var heights = get_image(CHANNEL_HEIGHT)
-	var normals = get_image(CHANNEL_NORMAL)
-	
-	assert(heights != null)
-	assert(normals != null)
-
-	var max_x = min_x + size_x
-	var max_y = min_y + size_y
-
-	var p_min = [min_x, min_y]
-	var p_max = [max_x, max_y]
-	Util.clamp_min_max_excluded(p_min, p_max, [0, 0], [heights.get_width(), heights.get_height()])
-	min_x = p_min[0]
-	min_y = p_min[1]
-	max_x = p_max[0]
-	max_y = p_max[1]
-
-	if normals.has_method("bumpmap_to_normalmap"):
-
-		# Calculating normals using this function will make border pixels invalid,
-		# so we must pick a region 1 pixel larger in all directions to be sure we have neighboring information.
-		# Then, we'll blit the result by cropping away this margin.
-		var min_pad_x = 0 if min_x == 0 else 1
-		var min_pad_y = 0 if min_y == 0 else 1
-		var max_pad_x = 0 if max_x == normals.get_width() else 1
-		var max_pad_y = 0 if max_y == normals.get_height() else 1
-
-		var src_extract_rect = Rect2( \
-			min_x - min_pad_x, \
-			min_y - min_pad_y, \
-			max_x - min_x + min_pad_x + max_pad_x, \
-			max_y - min_y + min_pad_x + max_pad_x)
-
-		var sub = heights.get_rect(src_extract_rect)
-		# TODO Need a parameter for this function to NOT wrap pixels,
-		# it can cause lighting artifacts on map borders
-		sub.bumpmap_to_normalmap()
-		sub.convert(normals.get_format())
-
-		var src_blit_rect = Rect2( \
-			min_pad_x, \
-			min_pad_x, \
-			sub.get_width() - min_pad_x - max_pad_x, \
-			sub.get_height() - min_pad_x - max_pad_y)
-
-		normals.blit_rect(sub, src_blit_rect, Vector2(min_x, min_y))
-
-	else:
-		# Godot 3.0.3 or earlier...
-		# It is slow.
-
-		#                             __________
-		#                          .~#########%%;~.
-		#                         /############%%;`\
-		#                        /######/~\/~\%%;,;,\
-		#                       |#######\    /;;;;.,.|
-		#                       |#########\/%;;;;;.,.|
-		#              XX       |##/~~\####%;;;/~~\;,|       XX
-		#            XX..X      |#|  o  \##%;/  o  |.|      X..XX
-		#          XX.....X     |##\____/##%;\____/.,|     X.....XX
-		#     XXXXX.....XX      \#########/\;;;;;;,, /      XX.....XXXXX
-		#    X |......XX%,.@      \######/%;\;;;;, /      @#%,XX......| X
-		#    X |.....X  @#%,.@     |######%%;;;;,.|     @#%,.@  X.....| X
-		#    X  \...X     @#%,.@   |# # # % ; ; ;,|   @#%,.@     X.../  X
-		#     X# \.X        @#%,.@                  @#%,.@        X./  #
-		#      ##  X          @#%,.@              @#%,.@          X   #
-		#    , "# #X            @#%,.@          @#%,.@            X ##
-		#       `###X             @#%,.@      @#%,.@             ####'
-		#      . ' ###              @#%.,@  @#%,.@              ###`"
-		#        . ";"                @#%.@#%,.@                ;"` ' .
-		#          '                    @#%,.@                   ,.
-		#          ` ,                @#%,.@  @@                `
-		#                              @@@  @@@  
-
-		heights.lock();
-		normals.lock();
-
-		for y in range(min_y, max_y):
-			for x in range(min_x, max_x):
-				
-				var left = _get_clamped(heights, x - 1, y).r
-				var right = _get_clamped(heights, x + 1, y).r
-				var fore = _get_clamped(heights, x, y + 1).r
-				var back = _get_clamped(heights, x, y - 1).r
-
-				var n = Vector3(left - right, 2.0, fore - back).normalized()
-
-				normals.set_pixel(x, y, _encode_normal(n))
-				
-		heights.unlock()
-		normals.unlock()
-
-	#var time_elapsed = OS.get_ticks_msec() - time_before
-	#print("Elapsed updating normals: ", time_elapsed, "ms")
-	#print("Was from ", min_x, ", ", min_y, " to ", max_x, ", ", max_y)
-
-
 # Call this function after you end modifying a map.
 # It will commit the change to the GPU so the change will take effect.
 # In the editor, it will also mark the map as modified so it will be saved when needed.
@@ -468,22 +356,33 @@ func notify_region_change(p_min, p_size, channel, index = 0):
 			_update_vertical_bounds(p_min[0], p_min[1], p_size[0], p_size[1])
 
 			_upload_region(channel, 0, p_min[0], p_min[1], p_size[0], p_size[1])
-			_upload_region(CHANNEL_NORMAL, 0, p_min[0], p_min[1], p_size[0], p_size[1])
-
-			_maps[CHANNEL_NORMAL][index].modified = true
 			_maps[channel][index].modified = true
 
 		CHANNEL_NORMAL, \
 		CHANNEL_SPLAT, \
 		CHANNEL_COLOR, \
-		CHANNEL_DETAIL:
+		CHANNEL_DETAIL, \
+		CHANNEL_GLOBAL_ALBEDO:
 			_upload_region(channel, index, p_min[0], p_min[1], p_size[0], p_size[1])
 			_maps[channel][index].modified = true
 
 		_:
-			print("Unrecognized channel\n")
+			printerr("Unrecognized channel\n")
 
 	emit_signal("region_changed", p_min[0], p_min[1], p_size[0], p_size[1], channel)
+
+
+func notify_full_change():
+	for maptype in range(CHANNEL_COUNT):
+		
+		# Ignore normals because they get updated along with heights
+		if maptype == CHANNEL_NORMAL:
+			continue
+
+		var maps = _maps[maptype]
+		
+		for index in len(maps):
+			notify_region_change([0, 0], [_resolution, _resolution], maptype, index)
 
 
 func _edit_set_disable_apply_undo(e):
@@ -539,21 +438,17 @@ func _edit_apply_undo(undo_data):
 
 		match channel:
 
-			CHANNEL_HEIGHT:
-				dst_image.blit_rect(data, data_rect, Vector2(min_x, min_y))
-				# Padding is needed because normals are calculated using neighboring,
-				# so a change in height X also requires normals in X-1 and X+1 to be updated
-				update_normals(min_x - 1, min_y - 1, max_x - min_x + 2, max_y - min_y + 2)
-
+			CHANNEL_HEIGHT, \
 			CHANNEL_SPLAT, \
 			CHANNEL_COLOR, \
 			CHANNEL_DETAIL:
 				dst_image.blit_rect(data, data_rect, Vector2(min_x, min_y))
 
-			CHANNEL_NORMAL:
-				print("This is a calculated channel!, no undo on this one\n")
+			CHANNEL_NORMAL, \
+			CHANNEL_GLOBAL_ALBEDO:
+				printerr("This is a calculated channel!, no undo on this one\n")
 			_:
-				print("Wut? Unsupported undo channel\n");
+				printerr("Wut? Unsupported undo channel\n");
 		
 		# Defer this to a second pass, otherwise it causes order-dependent artifacts on the normal map
 		regions_changed.append([[min_x, min_y], [max_x - min_x, max_y - min_y], channel, index])
@@ -569,7 +464,6 @@ func _upload_channel(channel, index):
 
 
 func _upload_region(channel, index, min_x, min_y, size_x, size_y):
-
 	#print("Upload ", min_x, ", ", min_y, ", ", size_x, "x", size_y)
 	#var time_before = OS.get_ticks_msec()
 
@@ -583,8 +477,12 @@ func _upload_region(channel, index, min_x, min_y, size_x, size_y):
 	if channel == CHANNEL_NORMAL \
 	or channel == CHANNEL_COLOR \
 	or channel == CHANNEL_SPLAT \
-	or channel == CHANNEL_HEIGHT:
+	or channel == CHANNEL_HEIGHT \
+	or channel == CHANNEL_GLOBAL_ALBEDO:
 		flags |= Texture.FLAG_FILTER
+	
+	if channel == CHANNEL_GLOBAL_ALBEDO:
+		flags |= Texture.FLAG_MIPMAPS
 
 	var texture = map.texture
 
@@ -665,28 +563,44 @@ func _upload_region(channel, index, min_x, min_y, size_x, size_y):
 	#print("Texture upload time: ", time_elapsed, "ms")
 
 
+# Gets how many instances of a given map are present in the terrain data.
+# A return value of 0 means there is no such map, and querying for it might cause errors.
 func get_map_count(map_type):
-	return len(_maps[map_type])
+	if map_type < len(_maps):
+		return len(_maps[map_type])
+	return 0
 
 
+# TODO Deprecated
 func _edit_add_detail_map():
-	print("Adding detail map")
-	var map_type = CHANNEL_DETAIL
-	var detail_maps = _maps[map_type]
+	return _edit_add_map(CHANNEL_DETAIL)
+
+
+# TODO Deprecated
+func _edit_remove_detail_map(index):
+	_edit_remove_map(CHANNEL_DETAIL, index)
+
+
+func _edit_add_map(map_type):
+	# TODO Check minimum and maximum instances of a given map
+	print("Adding map of type ", get_channel_name(map_type))
+	while map_type >= len(_maps):
+		_maps.append([])
+	var maps = _maps[map_type]
 	var map = Map.new(_get_free_id(map_type))
 	map.image = Image.new()
-	map.image.create(_resolution, _resolution, false, _get_channel_format(map_type))
-	var index = len(detail_maps)
-	detail_maps.append(map)
+	map.image.create(_resolution, _resolution, false, get_channel_format(map_type))
+	var index = len(maps)
+	maps.append(map)
 	emit_signal("map_added", map_type, index)
 	return index
 
 
-func _edit_remove_detail_map(index):
-	print("Removing detail map ", index)
-	var map_type = CHANNEL_DETAIL
-	var detail_maps = _maps[map_type]
-	detail_maps.remove(index)
+func _edit_remove_map(map_type, index):
+	# TODO Check minimum and maximum instances of a given map
+	print("Removing map ", get_channel_name(map_type), " at index ", index)
+	var maps = _maps[map_type]
+	maps.remove(index)
 	emit_signal("map_removed", map_type, index)
 
 
@@ -706,13 +620,13 @@ func _get_map_by_id(map_type, id):
 	return null
 
 
-func get_image(channel, index = 0):
-	var maps = _maps[channel]
+func get_image(maptype, index = 0):
+	var maps = _maps[maptype]
 	return maps[index].image
 
 
-func _get_texture(channel, index):
-	var maps = _maps[channel]
+func _get_texture(maptype, index):
+	var maps = _maps[maptype]
 	return maps[index].texture
 
 
@@ -726,6 +640,28 @@ func get_texture(channel, index = 0):
 func get_aabb():
 	# TODO Why subtract 1? I forgot
 	return get_region_aabb(0, 0, _resolution - 1, _resolution - 1)
+
+
+# Not so useful in itself, but GDScript is slow,
+# so I needed it to speed up the LOD hack I had to do to take height into account
+func get_point_aabb(cell_x, cell_y):
+	assert(typeof(cell_x) == TYPE_INT)
+	assert(typeof(cell_y) == TYPE_INT)
+	
+	var cx = cell_x / VERTICAL_BOUNDS_CHUNK_SIZE
+	var cy = cell_y / VERTICAL_BOUNDS_CHUNK_SIZE
+	
+	if cx < 0:
+		cx = 0
+	if cy < 0:
+		cy = 0
+	if cx >= _chunked_vertical_bounds_size[0]:
+		cx = _chunked_vertical_bounds_size[0]
+	if cy >= _chunked_vertical_bounds_size[1]:
+		cy = _chunked_vertical_bounds_size[1]
+	
+	var b = _chunked_vertical_bounds[cy][cx]
+	return Vector2(b.minv, b.maxv)
 
 
 func get_region_aabb(origin_in_cells_x, origin_in_cells_y, size_in_cells_x, size_in_cells_y):
@@ -855,7 +791,7 @@ func _compute_vertical_bounds_at(origin_x, origin_y, size_x, size_y, out_b):
 
 func _notify_progress(message, progress, finished = false):
 	_progress_complete = finished
-	print("[", int(100.0 * progress), "%] ", message)
+	#print("[", int(100.0 * progress), "%] ", message)
 	emit_signal("progress_notified", {
 		"message": message, 
 		"progress": progress,
@@ -994,6 +930,7 @@ func _save_channel(channel, index):
 	if _channel_can_be_saved_as_png(channel):
 		fpath += ".png"
 		im.save_png(fpath)
+		_try_write_default_import_options(fpath, channel)
 
 	else:
 		fpath += ".res"
@@ -1004,6 +941,65 @@ func _save_channel(channel, index):
 		_try_delete_0_8_0_heightmap(fpath.get_basename())
 	
 	return true
+
+
+static func _try_write_default_import_options(fpath, channel):
+	var imp_fpath = fpath + ".import"
+	var f = File.new()
+	if f.file_exists(imp_fpath):
+		# Already exists
+		return
+
+	var defaults = {
+		"remap": {
+			"importer": "texture",
+			"type": "StreamTexture"
+		},
+		"deps": {
+			"source_file": fpath
+		},
+		"params": {
+			# Don't compress. It ruins quality and makes the editor choke on big textures.
+			# I would have used ImageTexture.COMPRESS_LOSSLESS,
+			# but apparently what is saved in the .import file does not match,
+			# and rather corresponds TO THE UI IN THE IMPORT DOCK :facepalm:
+			"compress/mode": 0,
+			"compress/hdr_mode": 0,
+			"compress/normal_map": 0,
+			"flags/mipmaps": false,
+			"flags/filter": true,
+			# No need for this, the meaning of alpha is never transparency
+			"process/fix_alpha_border": false,
+			# Don't try to be smart.
+			# This can actually overwrite the settings with defaults...
+			# https://github.com/godotengine/godot/issues/24220
+			"detect_3d": false
+		}
+	}
+	
+	var err = f.open(imp_fpath, File.WRITE)
+	if err != OK:
+		printerr("Could not open `", imp_fpath, "` for write, error ", Errors.get_message(err))
+		return
+	
+	for section in defaults:
+		f.store_line(str("[", section, "]"))
+		f.store_line("")
+		var params = defaults[section]
+		for key in params:
+			var v = params[key]
+			var sv
+			match typeof(v):
+				TYPE_STRING:
+					sv = str('"', v.replace('"', '\"'), '"')
+				TYPE_BOOL:
+					sv = "true" if v else "false"
+				_:
+					sv = str(v)
+			f.store_line(str(key, "=", sv))
+		f.store_line("")
+	
+	f.close()
 
 
 func _load_channel(channel, index):
@@ -1046,7 +1042,6 @@ func _load_channel(channel, index):
 			printerr("Could not load ", fpath)
 			return false
 		
-		print("W: ", im.get_width())
 		_resolution = im.get_width()
 		
 		map.image = im
@@ -1079,7 +1074,7 @@ static func _try_load_0_8_0_heightmap(fpath, channel, existing_image):
 	var im = existing_image
 	if im == null:
 		im = Image.new()
-	im.create_from_data(width, height, false, _get_channel_format(channel), data)
+	im.create_from_data(width, height, false, get_channel_format(channel), data)
 	return im
 
 
@@ -1146,7 +1141,7 @@ func _import_heightmap(fpath, min_y, max_y):
 		_locked = true
 		
 		print("Resizing terrain to ", res, "x", res, "...")
-		set_resolution2(src_image.get_width(), false)
+		resize(src_image.get_width(), true, Vector2())
 		
 		var im = get_image(CHANNEL_HEIGHT)
 		assert(im != null)
@@ -1194,7 +1189,7 @@ func _import_heightmap(fpath, min_y, max_y):
 		_locked = true
 
 		print("Resizing terrain to ", width, "x", height, "...")
-		set_resolution2(res, false)
+		resize(res, true, Vector2())
 		
 		var im = get_image(CHANNEL_HEIGHT)
 		assert(im != null)
@@ -1225,9 +1220,6 @@ func _import_heightmap(fpath, min_y, max_y):
 		# File extension not recognized
 		return false
 	
-	print("Updating normals...")
-	_update_all_normals()
-	
 	_locked = false
 	
 	print("Notify region change...")
@@ -1249,8 +1241,8 @@ func _import_map(map_type, path):
 	if im.get_width() != res or im.get_height() != res:
 		im.crop(res, res)
 
-	if im.get_format() != _get_channel_format(map_type):
-		im.convert(_get_channel_format(map_type))
+	if im.get_format() != get_channel_format(map_type):
+		im.convert(get_channel_format(map_type))
 
 	var map = _maps[map_type][0]
 	map.image = im
@@ -1263,11 +1255,7 @@ static func _encode_normal(n):
 	return Color(0.5 * (n.x + 1.0), 0.5 * (n.z + 1.0), 0.5 * (n.y + 1.0), 1.0)
 
 
-#static func _decode_normal(c):
-#	return Vector3(2.0 * c.r - 1.0, 2.0 * c.b - 1.0, 2.0 * c.g - 1.0)
-
-
-static func _get_channel_format(channel):
+static func get_channel_format(channel):
 	match channel:
 		CHANNEL_HEIGHT:
 			return Image.FORMAT_RH
@@ -1279,8 +1267,10 @@ static func _get_channel_format(channel):
 			return Image.FORMAT_RGBA8
 		CHANNEL_DETAIL:
 			return Image.FORMAT_L8
+		CHANNEL_GLOBAL_ALBEDO:
+			return Image.FORMAT_RGB8
 	
-	print("Unrecognized channel\n")
+	printerr("Unrecognized channel\n")
 	return Image.FORMAT_MAX
 
 
@@ -1291,7 +1281,7 @@ static func _channel_can_be_saved_as_png(channel):
 	return true
 
 
-static func _get_channel_name(c):
+static func get_channel_name(c):
 	var name = null
 	match c:
 		CHANNEL_COLOR:
@@ -1304,16 +1294,18 @@ static func _get_channel_name(c):
 			name = "height"
 		CHANNEL_DETAIL:
 			name = "detail"
+		CHANNEL_GLOBAL_ALBEDO:
+			name = "global_albedo"
 	assert(name != null)
 	return name
 
 
 static func _get_map_debug_name(map_type, index):
-	return str(_get_channel_name(map_type), "[", index, "]")
+	return str(get_channel_name(map_type), "[", index, "]")
 
 
 func _get_map_filename(c, index):
-	var name = _get_channel_name(c)
+	var name = get_channel_name(c)
 	var id = _maps[c][index].id
 	if id > 0:
 		name += str(id + 1)
@@ -1328,6 +1320,8 @@ static func _get_channel_default_fill(c):
 			return Color(1, 0, 0, 0)
 		CHANNEL_DETAIL:
 			return Color(0, 0, 0, 0)
+		CHANNEL_NORMAL:
+			return _encode_normal(Vector3(0, 1, 0))
 		_:
 			# No need to fill
 			return null

@@ -10,6 +10,7 @@ const HTerrainChunkDebug = preload("hterrain_chunk_debug.gd")
 const Util = preload("util/util.gd")
 const HTerrainCollider = preload("hterrain_collider.gd")
 const DetailRenderer = preload("detail/detail_renderer.gd")
+const _NORMAL_BAKER_PATH = "res://addons/zylann.hterrain/tools/normalmap_baker.gd"
 
 const CLASSIC4_SHADER_PATH = "res://addons/zylann.hterrain/shaders/simple4.shader"
 const CLASSIC4_LITE_SHADER_PATH = "res://addons/zylann.hterrain/shaders/simple4_lite.shader"
@@ -30,6 +31,7 @@ const _api_shader_params = {
 	"u_terrain_normalmap": true,
 	"u_terrain_colormap": true,
 	"u_terrain_splatmap": true,
+	"u_terrain_globalmap": true,
 	
 	"u_terrain_inverse_transform": true,
 	"u_terrain_normal_basis": true,
@@ -103,10 +105,16 @@ var _updated_chunks = 0
 
 # Editor-only
 var _edit_manual_viewer_pos = Vector3()
+var _normals_baker = null
 
 func _init():
 	print("Create HeightMap")
-	_lodder.set_callbacks(funcref(self, "_cb_make_chunk"), funcref(self,"_cb_recycle_chunk"))
+	
+	_lodder.set_callbacks( \
+		funcref(self, "_cb_make_chunk"), \
+		funcref(self,"_cb_recycle_chunk"), \
+		funcref(self, "_cb_get_vertical_bounds"))
+	
 	_details.set_terrain(self)
 	set_notify_transform(true)
 
@@ -168,11 +176,11 @@ func _get_property_list():
 	for p in shader_params:
 		if _api_shader_params.has(p.name):
 			continue
-		props.append({
-			"name": str("shader_params/", p.name),
-			"type": p.type,
-			"usage": PROPERTY_USAGE_EDITOR | PROPERTY_USAGE_STORAGE
-		})
+		var cp = {}
+		for k in p:
+			cp[k] = p[k]
+		cp.name = str("shader_params/", p.name)
+		props.append(cp)
 	
 	for i in range(get_ground_texture_slot_count()):
 		for t in _ground_enum_to_name:
@@ -457,6 +465,11 @@ func set_data(new_data):
 		_data.disconnect("map_changed", self, "_on_data_map_changed")
 		_data.disconnect("map_added", self, "_on_data_map_added")
 		_data.disconnect("map_removed", self, "_on_data_map_removed")
+		
+		if _normals_baker != null:
+			_normals_baker.set_terrain_data(null)
+			_normals_baker.queue_free()
+			_normals_baker = null
 
 	_data = new_data
 
@@ -493,6 +506,11 @@ func _on_data_progress_notified(info):
 			_collider.create_from_terrain_data(_data)
 		
 		_details.reset()
+		
+		if Engine.editor_hint and _normals_baker == null:
+			_normals_baker = load(_NORMAL_BAKER_PATH).new()
+			add_child(_normals_baker)
+			_normals_baker.set_terrain_data(_data)
 		
 		emit_signal("progress_complete")
 
@@ -536,18 +554,25 @@ func _reset_ground_chunks():
 	_mesher.configure(_chunk_size, _chunk_size, _lodder.get_lod_count())
 
 
-func _on_data_region_changed(min_x, min_y, max_x, max_y, channel):
+func _on_data_region_changed(min_x, min_y, size_x, size_y, channel):
 	#print_line(String("_on_data_region_changed {0}, {1}, {2}, {3}").format(varray(min_x, min_y, max_x, max_y)));
 
 	# Testing only heights because it's the only channel that can impact geometry and LOD
 	if channel == HTerrainData.CHANNEL_HEIGHT:
-		set_area_dirty(min_x, min_y, max_x - min_x, max_y - min_y)
+		set_area_dirty(min_x, min_y, size_x, size_y)
+		
+		if _normals_baker != null:
+			_normals_baker.request_tiles_in_region(Vector2(min_x, min_y), Vector2(size_x, size_y))
 
 
 func _on_data_map_changed(type, index):
-	if type == HTerrainData.CHANNEL_DETAIL:
+	if type == HTerrainData.CHANNEL_DETAIL \
+	or type == HTerrainData.CHANNEL_HEIGHT \
+	or type == HTerrainData.CHANNEL_NORMAL \
+	or type == HTerrainData.CHANNEL_GLOBAL_ALBEDO:
 		_details.reset()
-	else:
+	
+	if type != HTerrainData.CHANNEL_DETAIL:
 		_material_params_need_update = true
 
 
@@ -634,6 +659,7 @@ func _update_material_params():
 	var normal_texture
 	var color_texture
 	var splat_texture
+	var global_texture
 	var res = Vector2(-1, -1)
 
 	# TODO Only get textures the shader supports
@@ -643,11 +669,13 @@ func _update_material_params():
 		normal_texture = _data.get_texture(HTerrainData.CHANNEL_NORMAL)
 		color_texture = _data.get_texture(HTerrainData.CHANNEL_COLOR)
 		splat_texture = _data.get_texture(HTerrainData.CHANNEL_SPLAT)
+		if _data.get_map_count(HTerrainData.CHANNEL_GLOBAL_ALBEDO) != 0:
+			global_texture = _data.get_texture(HTerrainData.CHANNEL_GLOBAL_ALBEDO)
 		res.x = _data.get_resolution()
 		res.y = res.x
 	
 	# Set all parameters from the terrain sytem.
-
+	
 	if is_inside_tree():
 		var gt = get_internal_transform()
 		var t = gt.affine_inverse()
@@ -661,12 +689,36 @@ func _update_material_params():
 	_material.set_shader_param(SHADER_PARAM_NORMAL_TEXTURE, normal_texture)
 	_material.set_shader_param(SHADER_PARAM_COLOR_TEXTURE, color_texture)
 	_material.set_shader_param(SHADER_PARAM_SPLAT_TEXTURE, splat_texture)
-		
+	_material.set_shader_param("u_terrain_globalmap", global_texture)
+	
 	for slot in len(_ground_textures):
 		var textures = _ground_textures[slot]
 		for type in len(textures):
 			var shader_param = get_ground_texture_shader_param(type, slot)
 			_material.set_shader_param(shader_param, textures[type])
+
+
+# Helper used for globalmap baking
+func setup_globalmap_material(mat):
+
+	var color_texture
+	var splat_texture
+
+	if has_data():
+		color_texture = _data.get_texture(HTerrainData.CHANNEL_COLOR)
+		splat_texture = _data.get_texture(HTerrainData.CHANNEL_SPLAT)
+
+	mat.set_shader_param("u_terrain_splatmap", splat_texture)
+	mat.set_shader_param("u_terrain_colormap", color_texture)
+	mat.set_shader_param("u_depth_blending", get_shader_param("u_depth_blending"))
+	mat.set_shader_param("u_ground_uv_scale", get_shader_param("u_ground_uv_scale"))
+
+	for slot in len(_ground_textures):
+		var textures = _ground_textures[slot]
+		for type in len(textures):
+			var shader_param = get_ground_texture_shader_param(type, slot)
+			var tex = textures[type]
+			mat.set_shader_param(shader_param, tex)
 
 
 func set_lod_scale(lod_scale):
@@ -739,7 +791,11 @@ func _process(delta):
 		if _data.get_resolution() != 0:
 			var gt = get_internal_transform()
 			var local_viewer_pos = gt.affine_inverse() * viewer_pos
+			#var time_before = OS.get_ticks_msec()
 			_lodder.update(local_viewer_pos)
+			#var time_elapsed = OS.get_ticks_msec() - time_before
+			#if Engine.get_frames_drawn() % 60 == 0:
+			#	print("Lodder time: ", time_elapsed)
 		
 		if _data.get_map_count(HTerrainData.CHANNEL_DETAIL) > 0:
 			# Note: the detail system is not affected by map scale,
@@ -934,8 +990,19 @@ func _cb_make_chunk(cpos_x, cpos_y, lod):
 
 # Called when a chunk is no longer seen
 func _cb_recycle_chunk(chunk, cx, cy, lod):
-	chunk.set_visible(false);
-	chunk.set_active(false);
+	chunk.set_visible(false)
+	chunk.set_active(false)
+
+
+func _cb_get_vertical_bounds(cpos_x, cpos_y, lod):
+	var chunk_size = _chunk_size * _lodder.get_lod_size(lod)
+	var origin_in_cells_x = cpos_x * chunk_size
+	var origin_in_cells_y = cpos_y * chunk_size
+	# This is a hack for speed, because the proper algorithm appears to be too slow for GDScript.
+	# It should be good enough for most common cases, unless you have super-sharp cliffs.
+	return _data.get_point_aabb(origin_in_cells_x + chunk_size / 2, origin_in_cells_y + chunk_size / 2)
+#	var aabb = _data.get_region_aabb(origin_in_cells_x, origin_in_cells_y, chunk_size, chunk_size)
+#	return Vector2(aabb.position.y, aabb.end.y)
 
 
 func _local_pos_to_cell(local_pos):
@@ -1028,6 +1095,14 @@ func set_detail_texture(slot, tex):
 
 func get_detail_texture(slot):
 	return _details.get_texture(slot)
+
+
+func set_detail_shader_param(slot, param_name, value):
+	_details.set_shader_param(slot, param_name, value)
+
+
+func get_detail_shader_param(slot, param_name):
+	return _details.get_shader_param(slot, param_name)
 
 
 func set_ambient_wind(amplitude):

@@ -8,11 +8,17 @@ signal texture_selected(index)
 # Emitted when a detail item is selected (grass painting)
 signal detail_selected(index)
 
+signal detail_list_changed
+
 
 onready var _minimap = get_node("HSplitContainer/HSplitContainer/Minimap")
 onready var _brush_editor = get_node("HSplitContainer/BrushEditor")
 onready var _texture_editor = get_node("HSplitContainer/HSplitContainer/HSplitContainer/TextureEditor")
 onready var _detail_editor = get_node("HSplitContainer/HSplitContainer/HSplitContainer/DetailEditor")
+
+
+func setup_dialogs(base_control):
+	_brush_editor.setup_dialogs(base_control)
 
 
 func set_terrain(terrain):
@@ -40,3 +46,6 @@ func _on_DetailEditor_detail_selected(index):
 func set_brush_editor_display_mode(mode):
 	_brush_editor.set_display_mode(mode)
 
+
+func _on_DetailEditor_detail_list_changed():
+	emit_signal("detail_list_changed")

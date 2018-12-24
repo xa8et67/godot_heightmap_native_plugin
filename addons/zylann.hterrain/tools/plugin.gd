@@ -4,6 +4,8 @@ extends EditorPlugin
 
 const HTerrain = preload("../hterrain.gd")#preload("hterrain.gdns")
 const HTerrainData = preload("../hterrain_data.gd")
+const HTerrainMesher = preload("../hterrain_mesher.gd")
+const PreviewGenerator = preload("preview_generator.gd")
 const Brush = preload("../hterrain_brush.gd")#preload("hterrain_brush.gdns")
 const BrushDecal = preload("brush/decal.gd")
 const Util = preload("../util/util.gd")
@@ -12,13 +14,19 @@ const EditPanel = preload("panel.tscn")
 const ProgressWindow = preload("progress_window.tscn")
 const GeneratorDialog = preload("generator/generator_dialog.tscn")
 const ImportDialog = preload("importer/importer_dialog.tscn")
+const GenerateMeshDialog = preload("generate_mesh_dialog.tscn")
+const ResizeDialog = preload("resize_dialog/resize_dialog.tscn")
+const GlobalMapBaker = preload("globalmap_baker.gd")
 
 const MENU_IMPORT_MAPS = 0
 # TODO Save items should not exist, they are workarounds to test saving!
 const MENU_SAVE = 1
 const MENU_LOAD = 2
 const MENU_GENERATE = 3
-const MENU_UPDATE_EDITOR_COLLIDER = 4
+const MENU_BAKE_GLOBALMAP = 4
+const MENU_RESIZE = 5
+const MENU_UPDATE_EDITOR_COLLIDER = 6
+const MENU_GENERATE_MESH = 7
 
 
 # TODO Rename _terrain
@@ -31,6 +39,10 @@ var _generator_dialog = null
 var _import_dialog = null
 var _progress_window = null
 var _load_texture_dialog = null
+var _generate_mesh_dialog = null
+var _preview_generator = null
+var _resize_dialog = null
+var _globalmap_baker = null
 
 var _brush = null
 var _brush_decal = null
@@ -44,10 +56,13 @@ static func get_icon(name):
 
 
 func _enter_tree():
-	print("Heightmap plugin Enter tree")
+	print("HTerrain plugin Enter tree")
 	
 	add_custom_type("HTerrain", "Spatial", HTerrain, get_icon("heightmap_node"))
 	add_custom_type("HTerrainData", "Resource", HTerrainData, get_icon("heightmap_data"))
+	
+	_preview_generator = PreviewGenerator.new()
+	get_editor_interface().get_resource_previewer().add_preview_generator(_preview_generator)
 	
 	_brush = Brush.new()
 	_brush.set_radius(5)
@@ -67,8 +82,10 @@ func _enter_tree():
 	# Apparently _ready() still isn't called at this point...
 	_panel.call_deferred("set_brush", _brush)
 	_panel.call_deferred("set_load_texture_dialog", _load_texture_dialog)
+	_panel.call_deferred("setup_dialogs", base_control)
 	_panel.connect("detail_selected", self, "_on_detail_selected")
 	_panel.connect("texture_selected", self, "_on_texture_selected")
+	_panel.connect("detail_list_changed", self, "_update_brush_buttons_availability")
 	
 	_toolbar = HBoxContainer.new()
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, _toolbar)
@@ -78,11 +95,15 @@ func _enter_tree():
 	menu.set_text("Terrain")
 	menu.get_popup().add_item("Import maps...", MENU_IMPORT_MAPS)
 	menu.get_popup().add_item("Generate...", MENU_GENERATE)
+	menu.get_popup().add_item("Resize...", MENU_RESIZE)
+	menu.get_popup().add_item("Bake global map", MENU_BAKE_GLOBALMAP)
 	menu.get_popup().add_separator()
 	menu.get_popup().add_item("Save", MENU_SAVE)
 	menu.get_popup().add_item("Load", MENU_LOAD)
 	menu.get_popup().add_separator()
 	menu.get_popup().add_item("Update Editor Collider", MENU_UPDATE_EDITOR_COLLIDER)
+	menu.get_popup().add_separator()
+	menu.get_popup().add_item("Generate mesh (heavy)", MENU_GENERATE_MESH)
 	menu.get_popup().connect("id_pressed", self, "_menu_item_selected")
 	_toolbar.add_child(menu)
 	
@@ -147,11 +168,25 @@ func _enter_tree():
 
 	_progress_window = ProgressWindow.instance()
 	base_control.add_child(_progress_window)
+	
+	_generate_mesh_dialog = GenerateMeshDialog.instance()
+	_generate_mesh_dialog.connect("generate_selected", self, "_on_GenerateMeshDialog_generate_selected")
+	base_control.add_child(_generate_mesh_dialog)
+	
+	_resize_dialog = ResizeDialog.instance()
+	base_control.add_child(_resize_dialog)
+	
+	_globalmap_baker = GlobalMapBaker.new()
+	_globalmap_baker.connect("progress_notified", self, "_terrain_progress_notified")
+	add_child(_globalmap_baker)
 
 
 func _exit_tree():
-	print("Heightmap plugin Exit tree")
+	print("HTerrain plugin Exit tree")
 	
+	# Make sure we release all references to edited stuff
+	edit(null)
+
 	_panel.queue_free()
 	_panel = null
 	
@@ -169,6 +204,20 @@ func _exit_tree():
 	
 	_progress_window.queue_free()
 	_progress_window = null
+	
+	_generate_mesh_dialog.queue_free()
+	_generate_mesh_dialog = null
+	
+	_resize_dialog.queue_free()
+	_resize_dialog = null
+
+	get_editor_interface().get_resource_previewer().remove_preview_generator(_preview_generator)
+	_preview_generator = null
+	
+	# https://github.com/godotengine/godot/issues/6254#issuecomment-246139694
+	# This was supposed to be automatic, but was never implemented it seems...
+	remove_custom_type("HTerrain")
+	remove_custom_type("HTerrainData")
 
 
 func handles(object):
@@ -192,10 +241,31 @@ func edit(object):
 		_node.connect("tree_exited", self, "_terrain_exited_scene")
 		_node.connect("progress_notified", self, "_terrain_progress_notified")
 	
+	_update_brush_buttons_availability()
+	
 	_panel.set_terrain(_node)
 	_generator_dialog.set_terrain(_node)
 	_import_dialog.set_terrain(_node)
 	_brush_decal.set_terrain(_node)
+	_generate_mesh_dialog.set_terrain(_node)
+	_resize_dialog.set_terrain(_node)
+
+
+func _update_brush_buttons_availability():
+	if _node == null:
+		return
+	if _node.get_data() != null:
+		var data = _node.get_data()
+		var has_details = (data.get_map_count(HTerrainData.CHANNEL_DETAIL) > 0)
+		
+		if has_details:
+			var button = _toolbar_brush_buttons[Brush.MODE_DETAIL]
+			button.disabled = false
+		else:
+			var button = _toolbar_brush_buttons[Brush.MODE_DETAIL]
+			if button.pressed:
+				_select_brush_mode(Brush.MODE_ADD)
+			button.disabled = true
 
 
 func make_visible(visible):
@@ -352,6 +422,14 @@ func _menu_item_selected(id):
 			
 		MENU_GENERATE:
 			_generator_dialog.popup_centered_minsize()
+		
+		MENU_BAKE_GLOBALMAP:
+			var data = _node.get_data()
+			if data != null:
+				_globalmap_baker.bake(_node)
+		
+		MENU_RESIZE:
+			_resize_dialog.popup_centered_minsize()
 			
 		MENU_UPDATE_EDITOR_COLLIDER:
 			# This is for editor tools to be able to use terrain collision.
@@ -368,6 +446,10 @@ func _menu_item_selected(id):
 			#    and make it so the data is in sync (no CoW plz!!). It's trickier than 1) but almost free.
 			#
 			_node.update_collider()
+		
+		MENU_GENERATE_MESH:
+			if _node != null and _node.get_data() != null:
+				_generate_mesh_dialog.popup_centered_minsize()
 
 
 func _on_mode_selected(mode):
@@ -414,5 +496,22 @@ func _terrain_progress_notified(info):
 		
 		_progress_window.show_progress(info.message, info.progress)
 		# TODO Have builtin modal progress bar
+		# https://github.com/godotengine/godot/issues/17763
 
 
+func _on_GenerateMeshDialog_generate_selected(lod):
+	var data = _node.get_data()
+	if data == null:
+		printerr("Terrain has no data")
+		return
+	var heightmap = data.get_image(HTerrainData.CHANNEL_HEIGHT)
+	var scale = _node.map_scale
+	var mesh = HTerrainMesher.make_heightmap_mesh(heightmap, lod, scale)
+	var mi = MeshInstance.new()
+	mi.name = str(_node.name, "_FullMesh")
+	mi.mesh = mesh
+	mi.transform = _node.transform
+	_node.get_parent().add_child(mi)
+	mi.set_owner(get_editor_interface().get_edited_scene_root())
+
+ 
