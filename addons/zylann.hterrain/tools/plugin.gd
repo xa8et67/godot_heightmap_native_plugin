@@ -2,11 +2,12 @@ tool
 extends EditorPlugin
 
 
-const HTerrain = preload("../hterrain.gd")#preload("hterrain.gdns")
+const HTerrain = preload("../hterrain.gd")
+const HTerrainDetailLayer = preload("../hterrain_detail_layer.gd")
 const HTerrainData = preload("../hterrain_data.gd")
 const HTerrainMesher = preload("../hterrain_mesher.gd")
 const PreviewGenerator = preload("preview_generator.gd")
-const Brush = preload("../hterrain_brush.gd")#preload("hterrain_brush.gdns")
+const Brush = preload("../hterrain_brush.gd")
 const BrushDecal = preload("brush/decal.gd")
 const Util = preload("../util/util.gd")
 const LoadTextureDialog = preload("load_texture_dialog.gd")
@@ -19,14 +20,11 @@ const ResizeDialog = preload("resize_dialog/resize_dialog.tscn")
 const GlobalMapBaker = preload("globalmap_baker.gd")
 
 const MENU_IMPORT_MAPS = 0
-# TODO Save items should not exist, they are workarounds to test saving!
-const MENU_SAVE = 1
-const MENU_LOAD = 2
-const MENU_GENERATE = 3
-const MENU_BAKE_GLOBALMAP = 4
-const MENU_RESIZE = 5
-const MENU_UPDATE_EDITOR_COLLIDER = 6
-const MENU_GENERATE_MESH = 7
+const MENU_GENERATE = 1
+const MENU_BAKE_GLOBALMAP = 2
+const MENU_RESIZE = 3
+const MENU_UPDATE_EDITOR_COLLIDER = 4
+const MENU_GENERATE_MESH = 5
 
 
 # TODO Rename _terrain
@@ -59,6 +57,7 @@ func _enter_tree():
 	print("HTerrain plugin Enter tree")
 	
 	add_custom_type("HTerrain", "Spatial", HTerrain, get_icon("heightmap_node"))
+	add_custom_type("HTerrainDetailLayer", "Spatial", HTerrainDetailLayer, get_icon("detail_layer_node"))
 	add_custom_type("HTerrainData", "Resource", HTerrainData, get_icon("heightmap_data"))
 	
 	_preview_generator = PreviewGenerator.new()
@@ -97,9 +96,6 @@ func _enter_tree():
 	menu.get_popup().add_item("Generate...", MENU_GENERATE)
 	menu.get_popup().add_item("Resize...", MENU_RESIZE)
 	menu.get_popup().add_item("Bake global map", MENU_BAKE_GLOBALMAP)
-	menu.get_popup().add_separator()
-	menu.get_popup().add_item("Save", MENU_SAVE)
-	menu.get_popup().add_item("Load", MENU_LOAD)
 	menu.get_popup().add_separator()
 	menu.get_popup().add_item("Update Editor Collider", MENU_UPDATE_EDITOR_COLLIDER)
 	menu.get_popup().add_separator()
@@ -214,22 +210,21 @@ func _exit_tree():
 	get_editor_interface().get_resource_previewer().remove_preview_generator(_preview_generator)
 	_preview_generator = null
 	
-	# https://github.com/godotengine/godot/issues/6254#issuecomment-246139694
+	# TODO https://github.com/godotengine/godot/issues/6254#issuecomment-246139694
 	# This was supposed to be automatic, but was never implemented it seems...
 	remove_custom_type("HTerrain")
+	remove_custom_type("HTerrainDetailLayer")
 	remove_custom_type("HTerrainData")
 
 
 func handles(object):
-	return object is HTerrain
+	return _get_terrain_from_object(object) != null
 
 
 func edit(object):
 	print("Edit ", object)
 	
-	var node = null
-	if object != null and object is HTerrain:
-		node = object
+	var node = _get_terrain_from_object(object)
 	
 	if _node != null:
 		_node.disconnect("tree_exited", self, "_terrain_exited_scene")
@@ -249,6 +244,20 @@ func edit(object):
 	_brush_decal.set_terrain(_node)
 	_generate_mesh_dialog.set_terrain(_node)
 	_resize_dialog.set_terrain(_node)
+	
+	if object is HTerrainDetailLayer:
+		# Auto-select layer for painting
+		_panel.set_detail_layer_index(object.get_layer_index())
+		_on_detail_selected(object.get_layer_index())
+
+
+static func _get_terrain_from_object(object):
+	if object != null and object is Spatial:
+		if object is HTerrain:
+			return object
+		if object is HTerrainDetailLayer and object.is_inside_tree() and object.get_parent() is HTerrain:
+			return object.get_parent()
+	return null
 
 
 func _update_brush_buttons_availability():
@@ -272,6 +281,11 @@ func make_visible(visible):
 	_panel.set_visible(visible)
 	_toolbar.set_visible(visible)
 	_brush_decal.update_visibility()
+
+	# TODO Workaround https://github.com/godotengine/godot/issues/6459
+	# When the user selects another node, I want the plugin to release its references to the terrain.
+	if not visible:
+		edit(null)
 
 
 func forward_spatial_gui_input(p_camera, p_event):
@@ -409,17 +423,7 @@ func _menu_item_selected(id):
 		
 		MENU_IMPORT_MAPS:
 			_import_dialog.popup_centered_minsize()
-			
-		MENU_SAVE:
-			var data = _node.get_data()
-			if data != null:
-				data.save_data_async()
-			
-		MENU_LOAD:
-			var data = _node.get_data()
-			if data != null:
-				data.load_data_async()
-			
+					
 		MENU_GENERATE:
 			_generator_dialog.popup_centered_minsize()
 		

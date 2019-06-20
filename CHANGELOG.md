@@ -5,13 +5,28 @@ This is a high-level changelog for each released versions of the plugin.
 For a more detailed list of past and incoming changes, see the commit history.
 
 
-0.11 Switching to Godot 3.1 (WIP)
--------------------------------------
+1.0.2
+------
 
-- [WIP] Saving a scene now saves terrains properly
-- [WIP] Grass layers are now nodes for ease of use
-- [WIP] Customizable grass shaders
-- [WIP] Customizable grass distance
+- Fix grass shader, it wasn't handling vertical map scale correctly
+- Fix smooth brush behaving like raise/lower in opacity lower than max
+- Fix terrain not saving changes made from the generator
+
+
+1.0.1
+------
+
+- Remove obsolete Save and Load menus, they don't work anymore
+
+
+1.0 Move to Godot 3.1
+------------------------
+
+- Saving a scene now saves terrains properly
+- Grass layers are now nodes for ease of use
+- Customizable grass shaders
+- Customizable grass distance
+- New documentation
 - Fixed resize causing artifacts on heightmap and brushes (engine side)
 - Fixed pickable collider causing a huge slowdown (raycasting is still slow but needs a fix in Bullet Physics)
 

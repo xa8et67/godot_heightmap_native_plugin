@@ -7,7 +7,7 @@ var _terrain_data = null
 
 
 func _init():
-	print("Create HTerrainCollider")
+	print("HTerrainCollider: creating body")
 	_shape_rid = PhysicsServer.shape_create(PhysicsServer.SHAPE_HEIGHTMAP)
 	_body_rid = PhysicsServer.body_create(PhysicsServer.BODY_MODE_STATIC)
 
@@ -17,6 +17,15 @@ func _init():
 
 	# TODO This is an attempt to workaround https://github.com/godotengine/godot/issues/24390
 	PhysicsServer.body_set_ray_pickable(_body_rid, false)
+
+	# TODO This is a workaround to https://github.com/godotengine/godot/issues/25304
+	PhysicsServer.shape_set_data(_shape_rid, {
+		"width": 1,
+		"depth": 1,
+		"heights": PoolRealArray([0]),
+		"min_height": -1,
+		"max_height": 1
+	})
 
 	PhysicsServer.body_add_shape(_body_rid, _shape_rid)
 
@@ -42,7 +51,8 @@ func set_world(world):
 
 func create_from_terrain_data(terrain_data):
 	assert(terrain_data != null)
-	print("Creating terrain collider shape")
+	assert(not terrain_data.is_locked())
+	print("HTerrainCollider: setting up heightmap")
 
 	_terrain_data = terrain_data
 
@@ -81,8 +91,12 @@ func _update_transform(aabb=null):
 
 	# Bullet centers the shape to its overall AABB so we need to move it to match the visuals
 	var trans = Transform(Basis(), 0.5 * Vector3(width, height, depth) + Vector3(0, aabb.position.y, 0))
-
+	
 	# And then apply the terrain transform
 	trans = _terrain_transform * trans
 
-	PhysicsServer.body_set_shape_transform(_body_rid, 0, trans)
+	PhysicsServer.body_set_state(_body_rid, PhysicsServer.BODY_STATE_TRANSFORM, trans)
+	# Cannot use shape transform when scaling is involved,
+	# because Godot is undoing that scale for some reason.
+	# See https://github.com/Zylann/godot_heightmap_plugin/issues/70
+	#PhysicsServer.body_set_shape_transform(_body_rid, 0, trans)
