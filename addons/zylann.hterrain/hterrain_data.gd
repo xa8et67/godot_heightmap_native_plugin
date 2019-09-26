@@ -34,8 +34,6 @@ signal map_added(type, index)
 signal map_removed(type, index)
 signal map_changed(type, index)
 
-signal _internal_process
-
 
 class VerticalBounds:
 	var minv = 0
@@ -67,7 +65,8 @@ var _maps = [[]]
 
 # TODO Store vertical bounds in a RGF image? Where R is min amd G is max
 var _chunked_vertical_bounds = []
-var _chunked_vertical_bounds_size = [0, 0]
+var _chunked_vertical_bounds_size_x = 0
+var _chunked_vertical_bounds_size_y = 0
 var _locked = false
 var _progress_complete = true
 
@@ -302,35 +301,28 @@ func get_all_heights():
 # It will commit the change to the GPU so the change will take effect.
 # In the editor, it will also mark the map as modified so it will be saved when needed.
 # Finally, it will emit `region_changed`, which allows other systems to catch up (like physics or grass)
-# p_min: origin point in cells of the rectangular area, as an array of 2 integers.
-# p_size: size of the rectangular area, as an array of 2 integers.
+# p_rect: modified area.
 # channel: which kind of map changed
 # index: index of the map that changed
-func notify_region_change(p_min, p_size, channel, index = 0):
+func notify_region_change(p_rect, channel, index = 0):
+	assert(channel >= 0 and channel < CHANNEL_COUNT)
+	
+	var min_x = int(p_rect.position.x)
+	var min_y = int(p_rect.position.y)
+	var size_x = int(p_rect.size.x)
+	var size_y = int(p_rect.size.y)
+	
+	if channel == CHANNEL_HEIGHT:
+		assert(index == 0)
+		# TODO when drawing very large patches, this might get called too often and would slow down.
+		# for better user experience, we could set chunks AABBs to a very large height just while drawing,
+		# and set correct AABBs as a background task once done
+		_update_vertical_bounds(min_x, min_y, size_x, size_y)
 
-	# TODO Hmm not sure if that belongs here // <-- why this, Me from the past?
-	match channel:
-		CHANNEL_HEIGHT:
-			# TODO when drawing very large patches, this might get called too often and would slow down.
-			# for better user experience, we could set chunks AABBs to a very large height just while drawing,
-			# and set correct AABBs as a background task once done
-			_update_vertical_bounds(p_min[0], p_min[1], p_size[0], p_size[1])
+	_upload_region(channel, index, min_x, min_y, size_x, size_y)
+	_maps[channel][index].modified = true
 
-			_upload_region(channel, 0, p_min[0], p_min[1], p_size[0], p_size[1])
-			_maps[channel][index].modified = true
-
-		CHANNEL_NORMAL, \
-		CHANNEL_SPLAT, \
-		CHANNEL_COLOR, \
-		CHANNEL_DETAIL, \
-		CHANNEL_GLOBAL_ALBEDO:
-			_upload_region(channel, index, p_min[0], p_min[1], p_size[0], p_size[1])
-			_maps[channel][index].modified = true
-
-		_:
-			printerr("Unrecognized channel\n")
-
-	emit_signal("region_changed", p_min[0], p_min[1], p_size[0], p_size[1], channel)
+	emit_signal("region_changed", min_x, min_y, size_x, size_y, channel)
 	emit_signal("changed")
 
 
@@ -344,7 +336,7 @@ func notify_full_change():
 		var maps = _maps[maptype]
 
 		for index in len(maps):
-			notify_region_change([0, 0], [_resolution, _resolution], maptype, index)
+			notify_region_change(Rect2(0, 0, _resolution, _resolution), maptype, index)
 
 
 func _edit_set_disable_apply_undo(e):
@@ -413,12 +405,10 @@ func _edit_apply_undo(undo_data):
 				printerr("Wut? Unsupported undo channel\n");
 
 		# Defer this to a second pass, otherwise it causes order-dependent artifacts on the normal map
-		regions_changed.append([[min_x, min_y], [max_x - min_x, max_y - min_y], channel, index])
+		regions_changed.append([Rect2(min_x, min_y, max_x - min_x, max_y - min_y), channel, index])
 
 	for args in regions_changed:
-		# TODO This one is VERY slow because partial texture updates is not supported...
-		# so the entire texture gets reuploaded for each chunk being undone
-		notify_region_change(args[0], args[1], args[2], args[3])
+		notify_region_change(args[0], args[1], args[2])
 
 
 func _upload_channel(channel, index):
@@ -434,6 +424,18 @@ func _upload_region(channel, index, min_x, min_y, size_x, size_y):
 	var image = map.image
 	assert(image != null)
 	assert(size_x > 0 and size_y > 0)
+
+	# TODO Actually, I think the input params should be valid in the first place...
+	if min_x < 0:
+		min_x = 0
+	if min_y < 0:
+		min_y = 0
+	if min_x + size_x > image.get_width():
+		size_x = image.get_width() - min_x
+	if min_y + size_y > image.get_height():
+		size_y = image.get_height() - min_y
+	if size_x <= 0 or size_y <= 0:
+		return
 
 	var flags = 0;
 	if channel == CHANNEL_NORMAL \
@@ -475,19 +477,7 @@ func _upload_region(channel, index, min_x, min_y, size_x, size_y):
 
 	else:
 		if VisualServer.has_method("texture_set_data_partial"):
-
-			# TODO Actually, I think the input params should be valid in the first place...
-			if min_x < 0:
-				min_x = 0
-			if min_y < 0:
-				min_y = 0
-			if min_x + size_x > image.get_width():
-				size_x = image.get_width() - min_x
-			if min_y + size_y > image.get_height():
-				size_y = image.get_height() - min_y
-			#if size_x <= 0 or size_y <= 0:
-			#	return
-
+			
 			VisualServer.texture_set_data_partial( \
 				texture.get_rid(), image, \
 				min_x, min_y, \
@@ -617,10 +607,10 @@ func get_point_aabb(cell_x, cell_y):
 		cx = 0
 	if cy < 0:
 		cy = 0
-	if cx >= _chunked_vertical_bounds_size[0]:
-		cx = _chunked_vertical_bounds_size[0]
-	if cy >= _chunked_vertical_bounds_size[1]:
-		cy = _chunked_vertical_bounds_size[1]
+	if cx >= _chunked_vertical_bounds_size_x:
+		cx = _chunked_vertical_bounds_size_x
+	if cy >= _chunked_vertical_bounds_size_y:
+		cy = _chunked_vertical_bounds_size_y
 
 	var b = _chunked_vertical_bounds[cy][cx]
 	return Vector2(b.minv, b.maxv)
@@ -647,13 +637,13 @@ func get_region_aabb(origin_in_cells_x, origin_in_cells_y, size_in_cells_x, size
 		cmin_x = 0
 	if cmin_y < 0:
 		cmin_y = 0
-	if cmax_x >= _chunked_vertical_bounds_size[0]:
-		cmax_x = _chunked_vertical_bounds_size[0]
-	if cmax_y >= _chunked_vertical_bounds_size[1]:
-		cmax_y = _chunked_vertical_bounds_size[1]
+	if cmax_x >= _chunked_vertical_bounds_size_x:
+		cmax_x = _chunked_vertical_bounds_size_x
+	if cmax_y >= _chunked_vertical_bounds_size_y:
+		cmax_y = _chunked_vertical_bounds_size_y
 
 	var min_height = 0
-	if cmin_x < _chunked_vertical_bounds_size[0] and cmin_y < _chunked_vertical_bounds_size[1]:
+	if cmin_x < _chunked_vertical_bounds_size_x and cmin_y < _chunked_vertical_bounds_size_y:
 		min_height = _chunked_vertical_bounds[cmin_y][cmin_x].minv
 	var max_height = min_height
 
@@ -681,7 +671,8 @@ func _update_all_vertical_bounds():
 	print("Updating all vertical bounds... (", csize_x , "x", csize_y, " chunks)")
 	# TODO Could set `preserve_data` to true, but would require callback to construct new cells
 	Grid.resize_grid(_chunked_vertical_bounds, csize_x, csize_y)
-	_chunked_vertical_bounds_size = [csize_x, csize_y]
+	_chunked_vertical_bounds_size_x = csize_x
+	_chunked_vertical_bounds_size_y = csize_y
 
 	_update_vertical_bounds(0, 0, _resolution - 1, _resolution - 1)
 
@@ -694,13 +685,10 @@ func _update_vertical_bounds(origin_in_cells_x, origin_in_cells_y, size_in_cells
 	var cmax_x = (origin_in_cells_x + size_in_cells_x - 1) / VERTICAL_BOUNDS_CHUNK_SIZE + 1
 	var cmax_y = (origin_in_cells_y + size_in_cells_y - 1) / VERTICAL_BOUNDS_CHUNK_SIZE + 1
 
-	var cmin = [cmin_x, cmin_y]
-	var cmax = [cmax_x, cmax_y]
-	Grid.clamp_min_max_excluded(cmin, cmax, _chunked_vertical_bounds_size)
-	cmin_x = cmin[0]
-	cmin_y = cmin[1]
-	cmax_x = cmax[0]
-	cmax_y = cmax[1]
+	cmin_x = Util.clamp_int(cmin_x, 0, _chunked_vertical_bounds_size_x - 1)
+	cmin_y = Util.clamp_int(cmin_y, 0, _chunked_vertical_bounds_size_y - 1)
+	cmax_x = Util.clamp_int(cmax_x, 0, _chunked_vertical_bounds_size_x)
+	cmax_y = Util.clamp_int(cmax_y, 0, _chunked_vertical_bounds_size_y)
 
 	# Note: chunks in _chunked_vertical_bounds share their edge cells and have an actual size of chunk size + 1.
 	var chunk_size_x = VERTICAL_BOUNDS_CHUNK_SIZE + 1
@@ -753,7 +741,7 @@ func _compute_vertical_bounds_at(origin_x, origin_y, size_x, size_y, out_b):
 
 func _notify_progress(message, progress, finished = false):
 	_progress_complete = finished
-	#print("[", int(100.0 * progress), "%] ", message)
+	print("[", int(100.0 * progress), "%] ", message)
 	emit_signal("progress_notified", {
 		"message": message,
 		"progress": progress,
@@ -765,7 +753,7 @@ func _notify_progress_complete():
 	_notify_progress("Done", 1.0, true)
 
 
-func _save_data_async(data_dir):
+func save_data(data_dir):
 	if not _is_any_map_modified():
 		print("Terrain data has no modifications to save")
 		return
@@ -775,7 +763,6 @@ func _save_data_async(data_dir):
 	_save_metadata(data_dir.plus_file(META_FILENAME))
 
 	_notify_progress("Saving terrain data...", 0.0)
-	yield(self, "_internal_process")
 
 	var map_count = _get_total_map_count()
 
@@ -794,7 +781,6 @@ func _save_data_async(data_dir):
 			_notify_progress(str("Saving map ", _get_map_debug_name(channel, index), \
 				" as ", _get_map_filename(channel, index), "..."), p)
 
-			yield(self, "_internal_process")
 			_save_channel(data_dir, channel, index)
 
 			map.modified = false
@@ -819,18 +805,6 @@ func _get_total_map_count():
 	for maps in _maps:
 		s += len(maps)
 	return s
-
-
-func save_data(dir_path):
-	_save_data_async(dir_path)
-	while not _progress_complete:
-		emit_signal("_internal_process")
-
-
-func load_data(dir_path):
-	load_data_async(dir_path)
-	while not _progress_complete:
-		emit_signal("_internal_process")
 
 
 func _load_metadata(path):
@@ -912,13 +886,12 @@ func _deserialize_metadata(dict):
 	return true
 
 
-func load_data_async(dir_path):
+func load_data(dir_path):
 	_locked = true
 
 	_load_metadata(dir_path.plus_file(META_FILENAME))
 
 	_notify_progress("Loading terrain data...", 0.0)
-	yield(self, "_internal_process")
 
 	var channel_instance_sum = _get_total_map_count()
 	var pi = 0
@@ -933,7 +906,6 @@ func load_data_async(dir_path):
 			var p = 0.1 + 0.6 * float(pi) / float(channel_instance_sum)
 			_notify_progress(str("Loading map ", _get_map_debug_name(map_type, index), \
 				" from ", _get_map_filename(map_type, index), "..."), p)
-			yield(self, "_internal_process")
 
 			_load_channel(dir_path, map_type, index)
 
@@ -943,11 +915,9 @@ func load_data_async(dir_path):
 			pi += 1
 
 	_notify_progress("Calculating vertical bounds...", 0.8)
-	yield(self, "_internal_process")
 	_update_all_vertical_bounds()
 
 	_notify_progress("Notify resolution change...", 0.9)
-	yield(self, "_internal_process")
 
 	_locked = false
 	emit_signal("resolution_changed")
@@ -1167,6 +1137,7 @@ func _edit_import_maps(input):
 	return true
 
 
+# Provided an arbitrary width and height, returns the closest size the terrain actually supports
 static func get_adjusted_map_size(width, height):
 	var width_po2 = Util.next_power_of_two(width - 1) + 1
 	var height_po2 = Util.next_power_of_two(height - 1) + 1
@@ -1276,7 +1247,7 @@ func _import_heightmap(fpath, min_y, max_y):
 	_locked = false
 
 	print("Notify region change...")
-	notify_region_change([0, 0], [get_resolution(), get_resolution()], CHANNEL_HEIGHT)
+	notify_region_change(Rect2(0, 0, get_resolution(), get_resolution()), CHANNEL_HEIGHT)
 
 	return true
 
@@ -1300,8 +1271,13 @@ func _import_map(map_type, path):
 	var map = _maps[map_type][0]
 	map.image = im
 
-	notify_region_change([0, 0], [im.get_width(), im.get_height()], map_type)
+	notify_region_change(Rect2(0, 0, im.get_width(), im.get_height()), map_type)
 	return true
+
+
+# TODO Workaround for https://github.com/Zylann/godot_heightmap_plugin/issues/101
+func _dummy_function():
+	pass
 
 
 static func _encode_normal(n):

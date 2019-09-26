@@ -129,7 +129,7 @@ func _init():
 
 	if collision_enabled:
 		if _check_heightmap_collider_support():
-			_collider = HTerrainCollider.new()
+			_collider = HTerrainCollider.new(self)
 
 
 func _get_property_list():
@@ -196,12 +196,6 @@ func _get_property_list():
 				"hint": PROPERTY_HINT_RESOURCE_TYPE,
 				"hint_string": "Texture"
 			})
-
-	props.append({
-		"name": "_detail_objects_data",
-		"type": TYPE_ARRAY,
-		"usage": PROPERTY_USAGE_STORAGE
-	})
 
 	return props
 
@@ -318,7 +312,7 @@ func set_collision_enabled(enabled):
 		collision_enabled = enabled
 		if collision_enabled:
 			if _check_heightmap_collider_support():
-				_collider = HTerrainCollider.new()
+				_collider = HTerrainCollider.new(self)
 				# Collision is not updated with data here, because loading is quite a mess at the moment...
 				# 1) This function can be called while no data has been set yet
 				# 2) I don't want to update the collider more times than necessary because it's expensive
@@ -625,6 +619,9 @@ func set_shader_type(type):
 			_material.shader = load(CLASSIC4_SHADER_PATH)
 
 	_material_params_need_update = true
+	
+	if Engine.editor_hint:
+		property_list_changed_notify()
 
 
 func get_custom_shader():
@@ -658,6 +655,9 @@ func set_custom_shader(shader):
 		_custom_shader.connect("changed", self, "_on_custom_shader_changed")
 		if _shader_type == SHADER_CUSTOM:
 			_material_params_need_update = true
+	
+	if Engine.editor_hint:
+		property_list_changed_notify()
 
 
 func _on_custom_shader_changed():
@@ -795,8 +795,6 @@ func _process(delta):
 				viewer_pos = camera.get_global_transform().origin
 
 	if has_data():
-		# TODO I would like to do this without needing a ref to the scene tree...
-		_data.emit_signal("_internal_process")
 
 		if _data.is_locked():
 			# Can't use the data for now
