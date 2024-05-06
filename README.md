@@ -1,16 +1,18 @@
-HeightMap terrain plugin for Godot Engine 3.1
-================================================
+HeightMap terrain plugin for Godot Engine
+=========================================
 
 ![Editor screenshot](https://user-images.githubusercontent.com/1311555/49705861-a5275380-fc19-11e8-8338-9ad364d2db8d.png)
 
-Heightmap-based terrain for Godot 3.1 and later.
+Heightmap-based terrain for Godot 4.1.
 It supports texture painting, colouring, holes, level of detail and grass, while still targetting the Godot API.
 
 This repository holds the latest development version, which means it has the latest features but can also have bugs.
 For a "stable" version, use the asset library or download from a commit tagged with a version.
 The `master` branch is the latest development version, and may have bugs. Some major features can also be in other branches until they are done. For release versions, check the Git branches named after those versions, like `0.10`.
 
-To get the last version that supported Godot 3.0.6, checkout branch `0.10`.
+To get the last version that supported Godot 3.0.6, checkout [branch `0.10`](https://github.com/Zylann/godot_heightmap_plugin/tree/0.10).
+
+To get the last version that supported Godot 3.x, checkout [branch `godot3`](https://github.com/Zylann/godot_heightmap_plugin/tree/godot3)
 
 
 Installation
@@ -27,23 +29,21 @@ https://github.com/Zylann/godot_hterrain_demo
 Usage
 ----------
 
-- ![General documentation](addons/zylann.hterrain/doc/main.md)
-
-- I also made a video about the 0.8 version of the plugin: https://www.youtube.com/watch?v=eZuvfIHDeT4&
+[Documentation](https://hterrain-plugin.readthedocs.io/en/latest/)
 
 
 Why this is a plugin
 ----------------------
 
 Godot has no terrain system for 3D at the moment, so I made one.
-The plugin is currently fully implemented in GDScript. I wish I could make it a C++ module, but being a GDScript plugin allows much faster iteration and everyone can try it and modify it much more easily. Eventually, one day some performance-sensitive areas could be implemented using GDNative, to optionally give some boost.
-There is a chance for Godot to get a built-in terrain system though, maybe in 3.2 or after, which is quite a long wait, so developping this plugin allows me to explore a lot of things up-front, such as procedural generation and editor tools, which could still be of use later.
+The plugin is currently fully implemented in GDScript. I wish I could make it a C++ module, but being a GDScript plugin allows much faster iteration and everyone can try it and modify it much more easily. Recently, some parts started to be implemented as a GDNative library to speed them up (only on supported platforms).
+Godot could get a terrain system in the future, maybe in 4.x or after, but it's going to be a long wait, so developping this plugin allows me to explore a lot of things up-front, such as procedural generation and editor tools, which could still be of use later.
 
 
 GLES2 support
 ---------------
 
-This plugin should work on GLES3, but could potentially work on GLES2 given the feature set that it should support. However, the plugin still cannot run on this renderer in Godot, which means it won't work on web exports and half of the mobile devices (low-end).
+Due to a number of things GLES2 doesn't support officially, and the disparity of extensions Godot is currently trying to use, making this plugin work in GLES2 is quite a lot of work. Some things might be easier, others need completely different implementations.
 
 Here are some of the causes:
 
@@ -53,9 +53,47 @@ Here are some of the causes:
 
 - `VisualServer` has `set_data_partial`, but it's not implemented so editing terrain doesn't work. GLES2 should also support partial texture update.
 
-- GLES2 does not requires texture fetch from vertex shader to work, so some mobile devices implement it, others don't. This plugin heavily relies on displacing vertices from shader. Generating unique meshes would require a huge rewrite just so it works on those devices and would use a ton more memory to store all the required meshes.
+- GLES2 does not require texture fetch from vertex shader to work, so some rare mobile devices implement it, others don't. This plugin heavily relies on displacing vertices from shader. Generating unique meshes would require a huge rewrite just so it works on those devices and would use a ton more memory to store all the required meshes and LODs.
 
 - The procedural generator doesn't work, and likely never will in GLES2 because it relies on HDR framebuffers.
 
 - For more info, see https://github.com/Zylann/godot_heightmap_plugin/issues/96
 
+
+Supporters
+-----------
+
+This plugin is a non-profit project developed by voluntary contributors. The following is the list of the current donors.
+Thanks for your support :)
+
+### Gold supporters
+
+```
+Aaron Franke (aaronfranke)
+```
+
+### Silver supporters
+
+```
+TheConceptBoy
+Chris Bolton (yochrisbolton)
+Gamerfiend (Snowminx) 
+greenlion (Justin Swanhart) 
+segfault-god (jp.owo.Manda)
+RonanZe
+Phyronnaz
+NoFr1ends (Lynx)
+```
+
+### Supporters
+
+```
+rcorre (Ryan Roden-Corrent) 
+duchainer (Raphaël Duchaîne)
+MadMartian
+stackdump (stackdump.eth)
+Treer
+MrGreaterThan
+lenis0012
+nan0m (Fabian)
+```
